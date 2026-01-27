@@ -9,18 +9,21 @@
 #define HEIGHT 700
 
 typedef struct {
-    float x, y;   // map-relative pixels
+    float x, y;
     int valid;
 } Point;
 
 float zoom = 1.0f;
 float offsetX = 0.0f, offsetY = 0.0f;
 
+int dragging = 0;
+int lastMouseX = 0, lastMouseY = 0;
+
 Point p1 = {0}, p2 = {0};
 SDL_Texture* mapTex = NULL;
 int mapWidth = 0, mapHeight = 0;
 
-// Reference points: {pixelX, pixelY} => {lat, lon}
+// Reference points
 typedef struct { float px, py; double lat, lon; } RefPoint;
 RefPoint refs[3] = {
     {1739.48f, 991.33f, 22.4, 68.96},
@@ -28,20 +31,20 @@ RefPoint refs[3] = {
     {2610.89f, 1370.26f, 0.955198, 119.006733}
 };
 
-// Text display buffer
 char infoText[256] = "";
 
 // Render text
-SDL_Texture* renderText(SDL_Renderer* renderer, TTF_Font* font, const char* text, SDL_Color color) {
-    SDL_Surface* surface = TTF_RenderText_Blended(font, text, color);
-    if (!surface) return NULL;
-    SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
-    SDL_FreeSurface(surface);
-    return texture;
+SDL_Texture* renderText(SDL_Renderer* r, TTF_Font* f, const char* t, SDL_Color c) {
+    SDL_Surface* s = TTF_RenderText_Blended(f, t, c);
+    if (!s) return NULL;
+    SDL_Texture* tex = SDL_CreateTextureFromSurface(r, s);
+    SDL_FreeSurface(s);
+    return tex;
 }
-// Draw grid over map
+
+// Grid
 void drawGrid(SDL_Renderer* r) {
-    SDL_SetRenderDrawColor(r,40, 40, 40, 255); // dark gray
+    SDL_SetRenderDrawColor(r, 40, 40, 40, 255);
     for (int x = -2000; x <= 2000; x += 100) {
         int sx = (int)((x + offsetX) * zoom + WIDTH / 2);
         SDL_RenderDrawLine(r, sx, 0, sx, HEIGHT);
@@ -52,7 +55,7 @@ void drawGrid(SDL_Renderer* r) {
     }
 }
 
-// Draw points
+// Points
 void drawPoint(SDL_Renderer* r, Point p) {
     if (!p.valid) return;
     SDL_SetRenderDrawColor(r, 255, 0, 0, 255);
@@ -62,7 +65,7 @@ void drawPoint(SDL_Renderer* r, Point p) {
     SDL_RenderFillRect(r, &rect);
 }
 
-// Simple linear interpolation
+// Simple interpolation
 void interpolate(double* lat, double* lon, float px, float py) {
     double tX = (px - refs[1].px) / (refs[2].px - refs[1].px);
     double tY = (py - refs[1].py) / (refs[0].py - refs[1].py);
@@ -72,130 +75,117 @@ void interpolate(double* lat, double* lon, float px, float py) {
     *lat = refs[1].lat + tY * (refs[0].lat - refs[1].lat);
 }
 
-int main(int argc, char* argv[]) {
+int main() {
     SDL_SetMainReady();
     SDL_Init(SDL_INIT_VIDEO);
     TTF_Init();
     IMG_Init(IMG_INIT_PNG);
 
-    SDL_Window* win = SDL_CreateWindow("Map Pixel Picker", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WIDTH, HEIGHT, SDL_WINDOW_SHOWN);
-    SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    SDL_Window* win = SDL_CreateWindow("Map Picker",
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        WIDTH, HEIGHT, SDL_WINDOW_SHOWN);
 
-    // Load map
+    SDL_Renderer* ren = SDL_CreateRenderer(win, -1,
+        SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+
     SDL_Surface* mapSurf = IMG_Load("temp1.png");
-    if (!mapSurf) { printf("IMG_Load failed: %s\n", IMG_GetError()); }
-    else {
-        mapTex = SDL_CreateTextureFromSurface(ren, mapSurf);
-        mapWidth = mapSurf->w; mapHeight = mapSurf->h;
-        SDL_FreeSurface(mapSurf);
-        offsetX = -mapWidth / 2.0f; offsetY = -mapHeight / 2.0f;
-    }
+    mapTex = SDL_CreateTextureFromSurface(ren, mapSurf);
+    mapWidth = mapSurf->w;
+    mapHeight = mapSurf->h;
+    SDL_FreeSurface(mapSurf);
+
+    offsetX = -mapWidth / 2.0f;
+    offsetY = -mapHeight / 2.0f;
 
     TTF_Font* font = TTF_OpenFont("arial.ttf", 16);
     SDL_Color white = {255,255,255,255};
-    int running = 1;
-    const Uint8* keyState;
 
+    int running = 1;
     while (running) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) running = 0;
 
-            // Zoom
             if (e.type == SDL_MOUSEWHEEL) {
                 zoom += e.wheel.y * 0.1f;
                 if (zoom < 0.2f) zoom = 0.2f;
                 if (zoom > 5.0f) zoom = 5.0f;
             }
 
-            // Left click points
+            // Left click → pick
             if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
                 int mx = e.button.x;
                 int my = e.button.y;
-                float px = (mx - WIDTH / 2) / zoom - offsetX + mapWidth / 2.0f;
-                float py = (my - HEIGHT / 2) / zoom - offsetY + mapHeight / 2.0f;
 
-                if (!p1.valid) { p1.x = px - mapWidth/2.0f; p1.y = py - mapHeight/2.0f; p1.valid = 1; }
-                else if (!p2.valid) { p2.x = px - mapWidth/2.0f; p2.y = py - mapHeight/2.0f; p2.valid = 1; }
+                float px = (mx - WIDTH/2)/zoom - offsetX + mapWidth/2.0f;
+                float py = (my - HEIGHT/2)/zoom - offsetY + mapHeight/2.0f;
+
+                if (!p1.valid) { p1.x = px-mapWidth/2; p1.y = py-mapHeight/2; p1.valid = 1; }
+                else if (!p2.valid) { p2.x = px-mapWidth/2; p2.y = py-mapHeight/2; p2.valid = 1; }
 
                 double lat, lon;
                 interpolate(&lat, &lon, px, py);
-                snprintf(infoText, sizeof(infoText), "Clicked pixel: %.2f, %.2f  |  lat: %.6f, lon: %.6f", px, py, lat, lon);
+                snprintf(infoText, sizeof(infoText),
+                    "Pixel: %.2f, %.2f | lat %.6f lon %.6f",
+                    px, py, lat, lon);
             }
 
-            // Reset
-            if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_r) {
-                zoom = 1.0f; offsetX = -mapWidth/2; offsetY = -mapHeight/2;
-                p1.valid = p2.valid = 0;
-                infoText[0] = 0;
+            // Right click drag → pan
+            if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_RIGHT) {
+                dragging = 1;
+                lastMouseX = e.button.x;
+                lastMouseY = e.button.y;
             }
 
-            // Clear points
+            if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_RIGHT) {
+                dragging = 0;
+            }
+
+            if (e.type == SDL_MOUSEMOTION && dragging) {
+                offsetX += (e.motion.x - lastMouseX) / zoom;
+                offsetY += (e.motion.y - lastMouseY) / zoom;
+                lastMouseX = e.motion.x;
+                lastMouseY = e.motion.y;
+            }
+
             if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_c) {
                 p1.valid = p2.valid = 0;
                 infoText[0] = 0;
             }
         }
 
-        // WASD panning
-        keyState = SDL_GetKeyboardState(NULL);
-        float panSpeed = 20.0f / zoom;
-        if (keyState[SDL_SCANCODE_S]) offsetY -= panSpeed;
-        if (keyState[SDL_SCANCODE_W]) offsetY += panSpeed;
-        if (keyState[SDL_SCANCODE_D]) offsetX -= panSpeed;
-        if (keyState[SDL_SCANCODE_A]) offsetX += panSpeed;
-
-        SDL_SetRenderDrawColor(ren, 20,20,20,255);
+        SDL_SetRenderDrawColor(ren, 255,255,255,255);
         SDL_RenderClear(ren);
 
-        // Draw map
-        if (mapTex) {
-            SDL_Rect dst;
-            dst.w = (int)(mapWidth*zoom);
-            dst.h = (int)(mapHeight*zoom);
-            dst.x = (int)((offsetX + mapWidth/2)*zoom + WIDTH/2 - dst.w/2);
-            dst.y = (int)((offsetY + mapHeight/2)*zoom + HEIGHT/2 - dst.h/2);
-            SDL_RenderCopy(ren, mapTex, NULL, &dst);
-        }
+        SDL_Rect dst = {
+            (int)((offsetX + mapWidth/2)*zoom + WIDTH/2 - mapWidth*zoom/2),
+            (int)((offsetY + mapHeight/2)*zoom + HEIGHT/2 - mapHeight*zoom/2),
+            (int)(mapWidth*zoom),
+            (int)(mapHeight*zoom)
+        };
+        SDL_RenderCopy(ren, mapTex, NULL, &dst);
 
-        drawPoint(ren,p1);
-        drawPoint(ren,p2);
-        // Draw map
-if (mapTex) {
-    SDL_Rect dst;
-    dst.w = (int)(mapWidth*zoom);
-    dst.h = (int)(mapHeight*zoom);
-    dst.x = (int)((offsetX + mapWidth/2)*zoom + WIDTH/2 - dst.w/2);
-    dst.y = (int)((offsetY + mapHeight/2)*zoom + HEIGHT/2 - dst.h/2);
-    SDL_RenderCopy(ren, mapTex, NULL, &dst);
-}
+        drawGrid(ren);
+        drawPoint(ren, p1);
+        drawPoint(ren, p2);
 
-// Draw grid over map
-drawGrid(ren);
-
-// Draw points
-drawPoint(ren, p1);
-drawPoint(ren, p2);
-
-        // Draw info text
-        if (infoText[0] != 0) {
+        if (infoText[0]) {
             SDL_Texture* t = renderText(ren, font, infoText, white);
-            if (t) {
-                SDL_Rect r = {10, 10, 0, 0};
-                SDL_QueryTexture(t, NULL, NULL, &r.w, &r.h);
-                SDL_RenderCopy(ren, t, NULL, &r);
-                SDL_DestroyTexture(t);
-            }
+            SDL_Rect r = {10,10,0,0};
+            SDL_QueryTexture(t,NULL,NULL,&r.w,&r.h);
+            SDL_RenderCopy(ren,t,NULL,&r);
+            SDL_DestroyTexture(t);
         }
 
         SDL_RenderPresent(ren);
         SDL_Delay(16);
     }
 
-    if(mapTex) SDL_DestroyTexture(mapTex);
+    SDL_DestroyTexture(mapTex);
     TTF_CloseFont(font);
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
     IMG_Quit(); TTF_Quit(); SDL_Quit();
     return 0;
 }
+
