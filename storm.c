@@ -1,191 +1,223 @@
 #define SDL_MAIN_HANDLED
+#include <SDL2/SDL_mixer.h>
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <SDL2/SDL_image.h>
 #include <stdio.h>
-#include <stdlib.h>
 
 #define WIDTH 1000
 #define HEIGHT 700
+#define TOPBAR 40
 
-typedef struct {
-    float x, y;
-    int valid;
-} Point;
+typedef struct { float x, y; int valid; } Point;
 
 float zoom = 1.0f;
-float offsetX = 0.0f, offsetY = 0.0f;
+float camX = 0, camY = 0;
 
-int dragging = 0;
-int lastMouseX = 0, lastMouseY = 0;
+Point p1={0}, p2={0};
+SDL_Texture* mapTex=NULL;
+int mapWidth, mapHeight;
+char infoText[128]="";
 
-Point p1 = {0}, p2 = {0};
-SDL_Texture* mapTex = NULL;
-int mapWidth = 0, mapHeight = 0;
-
-// Reference points
-typedef struct { float px, py; double lat, lon; } RefPoint;
-RefPoint refs[3] = {
-    {1739.48f, 991.33f, 22.4, 68.96},
-    {951.68f, 747.66f, 35.441618, 23.475934},
-    {2610.89f, 1370.26f, 0.955198, 119.006733}
-};
-
-char infoText[256] = "";
-
-// Render text
-SDL_Texture* renderText(SDL_Renderer* r, TTF_Font* f, const char* t, SDL_Color c) {
-    SDL_Surface* s = TTF_RenderText_Blended(f, t, c);
-    if (!s) return NULL;
-    SDL_Texture* tex = SDL_CreateTextureFromSurface(r, s);
+SDL_Texture* renderText(SDL_Renderer* r, TTF_Font* f, const char* t, SDL_Color c){
+    SDL_Surface* s=TTF_RenderText_Blended(f,t,c);
+    SDL_Texture* tex=SDL_CreateTextureFromSurface(r,s);
     SDL_FreeSurface(s);
     return tex;
 }
 
-// Grid
-void drawGrid(SDL_Renderer* r) {
-    SDL_SetRenderDrawColor(r, 40, 40, 40, 255);
-    for (int x = -2000; x <= 2000; x += 100) {
-        int sx = (int)((x + offsetX) * zoom + WIDTH / 2);
-        SDL_RenderDrawLine(r, sx, 0, sx, HEIGHT);
+int worldToScreenX(float wx){ return (int)((wx-camX)*zoom + WIDTH/2); }
+int worldToScreenY(float wy){ return (int)((wy-camY)*zoom + HEIGHT/2 + TOPBAR); }
+
+float screenToWorldX(int sx){ return (sx-WIDTH/2)/zoom + camX; }
+float screenToWorldY(int sy){ return (sy-TOPBAR-HEIGHT/2)/zoom + camY; }
+
+void drawGrid(SDL_Renderer* r){
+    SDL_SetRenderDrawColor(r, 40,40,40,255); // darker grid
+    int step=100;
+
+    int left=(int)screenToWorldX(0);
+    int right=(int)screenToWorldX(WIDTH);
+    int top=(int)screenToWorldY(TOPBAR);
+    int bottom=(int)screenToWorldY(HEIGHT+TOPBAR);
+
+    for(int x=(left/step)*step; x<=right; x+=step){
+        int sx = worldToScreenX(x);
+        SDL_RenderDrawLine(r, sx, TOPBAR, sx, HEIGHT+TOPBAR);
     }
-    for (int y = -2000; y <= 2000; y += 100) {
-        int sy = (int)((y + offsetY) * zoom + HEIGHT / 2);
+
+    for(int y=(top/step)*step; y<=bottom; y+=step){
+        int sy = worldToScreenY(y);
         SDL_RenderDrawLine(r, 0, sy, WIDTH, sy);
     }
 }
 
-// Points
-void drawPoint(SDL_Renderer* r, Point p) {
-    if (!p.valid) return;
-    SDL_SetRenderDrawColor(r, 255, 0, 0, 255);
-    int sx = (int)((p.x + offsetX) * zoom + WIDTH / 2);
-    int sy = (int)((p.y + offsetY) * zoom + HEIGHT / 2);
-    SDL_Rect rect = {sx - 5, sy - 5, 10, 10};
-    SDL_RenderFillRect(r, &rect);
+void drawPoint(SDL_Renderer* r, Point p){
+    if(!p.valid) return;
+    SDL_SetRenderDrawColor(r,255,0,0,255);
+
+    // Wrap horizontally
+    float px = p.x;
+    while(px - camX > mapWidth/2) px -= mapWidth;
+    while(px - camX < -mapWidth/2) px += mapWidth;
+
+    SDL_Rect rect={worldToScreenX(px)-5, worldToScreenY(p.y)-5,10,10};
+    SDL_RenderFillRect(r,&rect);
 }
 
-// Simple interpolation
-void interpolate(double* lat, double* lon, float px, float py) {
-    double tX = (px - refs[1].px) / (refs[2].px - refs[1].px);
-    double tY = (py - refs[1].py) / (refs[0].py - refs[1].py);
-    if (tX < 0) tX = 0; if (tX > 1) tX = 1;
-    if (tY < 0) tY = 0; if (tY > 1) tY = 1;
-    *lon = refs[1].lon + tX * (refs[2].lon - refs[1].lon);
-    *lat = refs[1].lat + tY * (refs[0].lat - refs[1].lat);
+// Example affine conversion pixel->lat/lon
+void pixelToGeo(double px,double py,double* lat,double* lon){
+    *lat = -0.0002465*px -0.0572*py +113.5108;
+    *lon =  0.05795*px +0.00001515*py -37.784;
 }
 
-int main() {
+
+int main(int argc,char* argv[]){
     SDL_SetMainReady();
-    SDL_Init(SDL_INIT_VIDEO);
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
     TTF_Init();
     IMG_Init(IMG_INIT_PNG);
+    
+    // Smaller buffer = lower latency (512 instead of 2048)
+    Mix_OpenAudio(22050, MIX_DEFAULT_FORMAT, 2, 512);
+    Mix_Init(MIX_INIT_MP3);
 
-    SDL_Window* win = SDL_CreateWindow("Map Picker",
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        WIDTH, HEIGHT, SDL_WINDOW_SHOWN);
+    SDL_Window* win=SDL_CreateWindow("Map Viewer",
+        SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,
+        WIDTH,HEIGHT+TOPBAR,0);
+    SDL_Renderer* ren=SDL_CreateRenderer(win,-1,SDL_RENDERER_ACCELERATED);
+    
+    Mix_Chunk* tickSound = Mix_LoadWAV("assets/tick.wav");
+    if(tickSound){
+        Mix_VolumeChunk(tickSound, MIX_MAX_VOLUME);
+    }
 
-    SDL_Renderer* ren = SDL_CreateRenderer(win, -1,
-        SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    SDL_Surface* surf=IMG_Load("temp1.png");
+    mapTex=SDL_CreateTextureFromSurface(ren,surf);
+    mapWidth=surf->w; mapHeight=surf->h;
+    SDL_FreeSurface(surf);
 
-    SDL_Surface* mapSurf = IMG_Load("temp1.png");
-    mapTex = SDL_CreateTextureFromSurface(ren, mapSurf);
-    mapWidth = mapSurf->w;
-    mapHeight = mapSurf->h;
-    SDL_FreeSurface(mapSurf);
+    TTF_Font* font=TTF_OpenFont("arial.ttf",16);
+    SDL_Color black={0,0,0,255};
 
-    offsetX = -mapWidth / 2.0f;
-    offsetY = -mapHeight / 2.0f;
+    int dragging=0,lastX,lastY,running=1;
 
-    TTF_Font* font = TTF_OpenFont("arial.ttf", 16);
-    SDL_Color white = {255,255,255,255};
-
-    int running = 1;
-    while (running) {
+    while(running){
         SDL_Event e;
-        while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) running = 0;
+        while(SDL_PollEvent(&e)){
+            if(e.type==SDL_QUIT) running=0;
 
-            if (e.type == SDL_MOUSEWHEEL) {
-                zoom += e.wheel.y * 0.1f;
-                if (zoom < 0.2f) zoom = 0.2f;
-                if (zoom > 5.0f) zoom = 5.0f;
+            if(e.type == SDL_MOUSEWHEEL){
+                float oldZoom = zoom;
+
+                zoom += e.wheel.y * 0.05f;
+
+                if(zoom < 0.3f) zoom = 0.3f;   // min zoom out
+                // (no max zoom limit)
+
+                if(zoom != oldZoom && tickSound){   // only if zoom actually changed and sound loaded
+                    int mx, my;
+                    SDL_GetMouseState(&mx, &my);
+
+                    float wx = screenToWorldX(mx);
+                    float wy = screenToWorldY(my);
+
+                    camX = wx - (mx - WIDTH/2) / zoom;
+                    camY = wy - (my - TOPBAR - HEIGHT/2) / zoom;
+
+                    Mix_PlayChannel(-1, tickSound, 0);
+                }
             }
 
-            // Left click → pick
-            if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
-                int mx = e.button.x;
-                int my = e.button.y;
+            if(e.type==SDL_MOUSEBUTTONDOWN && e.button.button==SDL_BUTTON_LEFT){
+                float wx=screenToWorldX(e.button.x);
+                float wy=screenToWorldY(e.button.y);
 
-                float px = (mx - WIDTH/2)/zoom - offsetX + mapWidth/2.0f;
-                float py = (my - HEIGHT/2)/zoom - offsetY + mapHeight/2.0f;
+                if(!p1.valid){p1.x=wx;p1.y=wy;p1.valid=1;}
+                else if(!p2.valid){p2.x=wx;p2.y=wy;p2.valid=1;}
 
-                if (!p1.valid) { p1.x = px-mapWidth/2; p1.y = py-mapHeight/2; p1.valid = 1; }
-                else if (!p2.valid) { p2.x = px-mapWidth/2; p2.y = py-mapHeight/2; p2.valid = 1; }
-
-                double lat, lon;
-                interpolate(&lat, &lon, px, py);
-                snprintf(infoText, sizeof(infoText),
-                    "Pixel: %.2f, %.2f | lat %.6f lon %.6f",
-                    px, py, lat, lon);
+                double px=wx+mapWidth/2;
+                double py=wy+mapHeight/2;
+                double lat,lon;
+                pixelToGeo(px,py,&lat,&lon);
+                snprintf(infoText,sizeof(infoText),"Pixel %.0f,%.0f | Lat %.6f Lon %.6f",px,py,lat,lon);
             }
 
-            // Right click drag → pan
-            if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_RIGHT) {
-                dragging = 1;
-                lastMouseX = e.button.x;
-                lastMouseY = e.button.y;
+            if(e.type==SDL_MOUSEBUTTONDOWN && e.button.button==SDL_BUTTON_RIGHT){
+                dragging=1; lastX=e.button.x; lastY=e.button.y;
+            }
+            if(e.type==SDL_MOUSEBUTTONUP) dragging=0;
+
+            if(e.type==SDL_MOUSEMOTION && dragging){
+                camX-=(e.motion.x-lastX)/zoom;
+                camY-=(e.motion.y-lastY)/zoom;
+                lastX=e.motion.x; lastY=e.motion.y;
+
+                // wrap horizontally
+                if(camX>mapWidth/2) camX-=mapWidth;
+                if(camX<-mapWidth/2) camX+=mapWidth;
             }
 
-            if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_RIGHT) {
-                dragging = 0;
-            }
-
-            if (e.type == SDL_MOUSEMOTION && dragging) {
-                offsetX += (e.motion.x - lastMouseX) / zoom;
-                offsetY += (e.motion.y - lastMouseY) / zoom;
-                lastMouseX = e.motion.x;
-                lastMouseY = e.motion.y;
-            }
-
-            if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_c) {
-                p1.valid = p2.valid = 0;
-                infoText[0] = 0;
-            }
+            if(e.type==SDL_KEYDOWN && e.key.keysym.sym==SDLK_c){p1.valid=p2.valid=0;}
         }
 
-        SDL_SetRenderDrawColor(ren, 255,255,255,255);
+        SDL_SetRenderDrawColor(ren,255,255,255,255);
         SDL_RenderClear(ren);
 
-        SDL_Rect dst = {
-            (int)((offsetX + mapWidth/2)*zoom + WIDTH/2 - mapWidth*zoom/2),
-            (int)((offsetY + mapHeight/2)*zoom + HEIGHT/2 - mapHeight*zoom/2),
-            (int)(mapWidth*zoom),
-            (int)(mapHeight*zoom)
-        };
-        SDL_RenderCopy(ren, mapTex, NULL, &dst);
+        // DRAW HORIZONTALLY WRAPPING MAP (3 copies)
+        for(int dx=-1;dx<=1;dx++){
+            SDL_Rect dst={worldToScreenX(-mapWidth/2 + dx*mapWidth), worldToScreenY(-mapHeight/2),
+                          mapWidth*zoom, mapHeight*zoom};
+            SDL_RenderCopy(ren,mapTex,NULL,&dst);
+        }
 
+        // DRAW GRID AND POINTS ABOVE MAP
         drawGrid(ren);
-        drawPoint(ren, p1);
-        drawPoint(ren, p2);
+        drawPoint(ren,p1);
+        drawPoint(ren,p2);
 
-        if (infoText[0]) {
-            SDL_Texture* t = renderText(ren, font, infoText, white);
-            SDL_Rect r = {10,10,0,0};
-            SDL_QueryTexture(t,NULL,NULL,&r.w,&r.h);
-            SDL_RenderCopy(ren,t,NULL,&r);
-            SDL_DestroyTexture(t);
+        // DRAW TOP BAR LAST WITH DROP SHADOW
+        SDL_SetRenderDrawColor(ren,0,0,0,100); // shadow
+        SDL_Rect shadow={0,TOPBAR,WIDTH,4};
+        SDL_RenderFillRect(ren,&shadow);
+
+        SDL_SetRenderDrawColor(ren,255,255,255,255); // white bar
+        SDL_Rect topBar={0,0,WIDTH,TOPBAR};
+        SDL_RenderFillRect(ren,&topBar);
+
+        // Zoom text
+        char ztxt[32];
+        snprintf(ztxt,sizeof(ztxt),"Zoom: %.2f",zoom);
+        SDL_Texture* zt=renderText(ren,font,ztxt,black);
+        SDL_Rect zr={10,8,0,0};
+        SDL_QueryTexture(zt,NULL,NULL,&zr.w,&zr.h);
+        SDL_RenderCopy(ren,zt,NULL,&zr);
+        SDL_DestroyTexture(zt);
+
+        // Info text
+        if(infoText[0]){
+            SDL_Texture* it=renderText(ren,font,infoText,black);
+            SDL_Rect ir={200,8,0,0};
+            SDL_QueryTexture(it,NULL,NULL,&ir.w,&ir.h);
+            SDL_RenderCopy(ren,it,NULL,&ir);
+            SDL_DestroyTexture(it);
         }
 
         SDL_RenderPresent(ren);
         SDL_Delay(16);
     }
 
+    // Cleanup
+    if(tickSound) Mix_FreeChunk(tickSound);
     SDL_DestroyTexture(mapTex);
     TTF_CloseFont(font);
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
-    IMG_Quit(); TTF_Quit(); SDL_Quit();
+    Mix_CloseAudio();
+    Mix_Quit();
+    IMG_Quit();
+    TTF_Quit();
+    SDL_Quit();
+    
     return 0;
 }
-
