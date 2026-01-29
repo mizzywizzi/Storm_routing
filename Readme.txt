@@ -1,2 +1,2 @@
 Run with dependencies:
-sdl2,ttf,image,mwindows
+sdl2,ttf,image,mwindows,mixer
