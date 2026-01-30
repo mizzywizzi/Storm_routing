@@ -489,9 +489,10 @@ int main(int argc,char* argv[]){
         printf("Warning: Could not load land polygons, all cells will be water\n");
     }
 
-    TTF_Font* font=TTF_OpenFont("arial.ttf",16);
+    TTF_Font* font=TTF_OpenFont("assets/fonts/DejaVuSans.ttf",16);
     if(!font){
-        font=TTF_OpenFont("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",16);
+        printf("FONT LOAD ERROR: %s\n", TTF_GetError());
+    return 1;
     }
     SDL_Color black={0,0,0,255};
 
