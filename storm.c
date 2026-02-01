@@ -347,7 +347,7 @@ int main(int argc, char* argv[]) {
         SDL_SetRenderDrawColor(ren, 240, 240, 240, 255);
         SDL_Rect bar = {0,0,WIDTH,TOPBAR}; SDL_RenderFillRect(ren, &bar);
         
-        // Coordinates Display (Top Left below bar) - Now showing latitude/longitude
+        // Coordinates Display (Inside top bar - left side)
         if (p1.valid || p2.valid) {
             char coords[128];
             // Convert world coordinates to pixel coordinates, then to lat/lon
@@ -364,7 +364,7 @@ int main(int argc, char* argv[]) {
             snprintf(coords, sizeof(coords), "A: (%.6f, %.6f)  B: (%.6f, %.6f)", p1_lat, p1_lon, p2_lat, p2_lon);
             SDL_Surface* cs = TTF_RenderText_Blended(font, coords, (SDL_Color){50,50,50,255});
             SDL_Texture* ct = SDL_CreateTextureFromSurface(ren, cs);
-            SDL_Rect cr = {10, TOPBAR + 10, cs->w, cs->h};
+            SDL_Rect cr = {10, 12, cs->w, cs->h};  // Moved to top bar at y=12 for vertical centering
             SDL_RenderCopy(ren, ct, NULL, &cr);
             SDL_FreeSurface(cs); SDL_DestroyTexture(ct);
         }
