@@ -1,0 +1,1 @@
+Generic vessel speed=14 kts mode=BALANCED
